@@ -1,0 +1,1 @@
+ALTER TABLE export_jobs ADD COLUMN sha256_hash VARCHAR(64);

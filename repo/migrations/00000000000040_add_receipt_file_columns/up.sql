@@ -1,0 +1,4 @@
+ALTER TABLE receipts ADD COLUMN file_path VARCHAR(1024);
+ALTER TABLE receipts ADD COLUMN content_type VARCHAR(128);
+ALTER TABLE receipts ADD COLUMN file_size_bytes BIGINT;
+ALTER TABLE receipts ADD COLUMN sha256_hash VARCHAR(64);

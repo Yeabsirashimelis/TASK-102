@@ -1,0 +1,1 @@
+ALTER TABLE export_jobs DROP COLUMN IF EXISTS sha256_hash;

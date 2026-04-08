@@ -1,0 +1,2 @@
+DELETE FROM role_permissions WHERE permission_point_id = 'b0000000-0000-0000-0000-000000000112';
+DELETE FROM permission_points WHERE id = 'b0000000-0000-0000-0000-000000000112';

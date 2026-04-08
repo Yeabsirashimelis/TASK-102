@@ -1,0 +1,4 @@
+ALTER TABLE receipts DROP COLUMN IF EXISTS sha256_hash;
+ALTER TABLE receipts DROP COLUMN IF EXISTS file_size_bytes;
+ALTER TABLE receipts DROP COLUMN IF EXISTS content_type;
+ALTER TABLE receipts DROP COLUMN IF EXISTS file_path;
