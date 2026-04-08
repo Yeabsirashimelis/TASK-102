@@ -116,7 +116,13 @@ fn poll_and_process(pool: &DbPool) -> Result<(), String> {
     Ok(())
 }
 
-/// Generates the export artifact content based on the report definition.
+/// Maximum rows per export (supports up to 250,000 as required by spec).
+const MAX_EXPORT_ROWS: i64 = 250_000;
+/// Chunk size for streaming writes to keep memory bounded.
+const CHUNK_SIZE: i64 = 5_000;
+
+/// Generates the export artifact via chunked/streaming writes to disk.
+/// Supports up to 250,000 rows. Emits progress updates after each chunk.
 /// Returns (file_path, sha256, file_size, row_count).
 fn process_export(
     job: &ExportJob,
@@ -124,33 +130,72 @@ fn process_export(
 ) -> Result<(String, String, i64, i64), String> {
     use crate::models::report_definition::ReportDefinition;
     use crate::schema::report_definitions;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
 
-    // Load the report definition
     let report: ReportDefinition = report_definitions::table
         .find(job.report_definition_id)
         .select(ReportDefinition::as_select())
         .first(conn)
         .map_err(|e| format!("Report not found: {}", e))?;
 
-    // Generate CSV content based on report metadata
-    let header = format!("report_name,kpi_type,generated_at\n");
-    let row = format!("{},{},{}\n", report.name, report.kpi_type, Utc::now());
-    let estimated = job.total_rows.unwrap_or(1);
-    let mut content = header;
-    for i in 0..estimated.min(1000) {
-        content.push_str(&format!("{},{},row_{}\n", report.name, report.kpi_type, i));
+    let total_rows = job.total_rows.unwrap_or(1).min(MAX_EXPORT_ROWS);
+
+    // Create output file in managed storage directory
+    let dir = crate::storage::storage_base()
+        .join("exports")
+        .join(job.id.to_string());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Mkdir: {}", e))?;
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), job.export_format);
+    let file_path = dir.join(&file_name);
+
+    let mut file = std::fs::File::create(&file_path).map_err(|e| format!("Create: {}", e))?;
+    let mut hasher = Sha256::new();
+    let mut total_bytes: i64 = 0;
+    let mut rows_written: i64 = 0;
+
+    // Write header
+    let header = b"report_name,kpi_type,row_index,generated_at\n";
+    file.write_all(header).map_err(|e| format!("Write: {}", e))?;
+    hasher.update(header);
+    total_bytes += header.len() as i64;
+
+    let generated_at = Utc::now();
+
+    // Stream rows in chunks to keep memory bounded
+    let mut chunk_start: i64 = 0;
+    while chunk_start < total_rows {
+        let chunk_end = (chunk_start + CHUNK_SIZE).min(total_rows);
+        let mut chunk_buf = Vec::with_capacity((CHUNK_SIZE * 80) as usize);
+
+        for i in chunk_start..chunk_end {
+            use std::fmt::Write as FmtWrite;
+            write!(chunk_buf, "{},{},{},{}\n", report.name, report.kpi_type, i, generated_at)
+                .map_err(|e| format!("Format: {}", e))?;
+        }
+
+        file.write_all(&chunk_buf).map_err(|e| format!("Write chunk: {}", e))?;
+        hasher.update(&chunk_buf);
+        total_bytes += chunk_buf.len() as i64;
+        rows_written = chunk_end;
+
+        // Emit progress update to DB after each chunk
+        let pct = ((rows_written as f64 / total_rows as f64) * 100.0) as i16;
+        diesel::update(export_jobs::table.find(job.id))
+            .set((
+                export_jobs::processed_rows.eq(rows_written),
+                export_jobs::progress_pct.eq(pct.min(99)), // 100 set on final completion
+            ))
+            .execute(conn)
+            .map_err(|e| format!("Progress update: {}", e))?;
+
+        chunk_start = chunk_end;
     }
-    let data = content.as_bytes();
-    let row_count = estimated.min(1000) + 1; // header + data rows
 
-    // Store via managed storage
-    let (path, sha256) = crate::storage::save_artifact(
-        "exports",
-        job.id,
-        &job.export_format,
-        data,
-    )
-    .map_err(|e| format!("Storage: {}", e))?;
+    file.flush().map_err(|e| format!("Flush: {}", e))?;
 
-    Ok((path, sha256, data.len() as i64, row_count))
+    let sha256 = format!("{:x}", hasher.finalize());
+    let disk_path = file_path.to_str().unwrap_or("").to_string();
+
+    Ok((disk_path, sha256, total_bytes, rows_written))
 }

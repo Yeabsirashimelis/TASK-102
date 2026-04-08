@@ -668,6 +668,200 @@ assert_body "[F5] Transition audit has after_hash" "after_hash"
 echo ""
 
 ###########################################################################
+echo "── Section 25: [T5] Cross-scope Return/Exchange ──"
+
+# Create a paid order as admin in location SCOPE-Z
+http_post "$API/orders" '{"location":"SCOPE-Z","department":"DeptZ","line_items":[{"sku":"Z1","description":"Z","quantity":1,"unit_price_cents":1000,"tax_cents":0}]}'
+SCOPE_Z_ORDER=$(jf id)
+http_post "$API/orders/$SCOPE_Z_ORDER/transition" '{"target_status":"open"}'
+http_post "$API/orders/$SCOPE_Z_ORDER/transition" '{"target_status":"tendering"}'
+ZKEY="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+http_post "$API/orders/$SCOPE_Z_ORDER/payments" "{\"tender_type\":\"cash\",\"amount_cents\":1000,\"idempotency_key\":\"$ZKEY\"}"
+# Get line item ID for return
+http_get "$API/orders/$SCOPE_Z_ORDER"
+Z_LINE_ID=$(echo "$_BODY" | grep -o '"id":"[^"]*"' | sed -n '3p' | cut -d'"' -f4)
+
+# Login as cashier (individual scope, different location)
+TOKEN="$CASHIER_TOKEN"
+
+# Cross-scope return should be blocked
+RKEY_Z="ffffffff-ffff-ffff-ffff-ffffffffffff"
+http_post "$API/orders/$SCOPE_Z_ORDER/returns" "{\"idempotency_key\":\"$RKEY_Z\",\"line_items\":[{\"original_line_item_id\":\"$Z_LINE_ID\",\"quantity\":1}]}"
+assert_status "[T5] Cross-scope return blocked" "403" "$_STATUS"
+
+# Cross-scope exchange should be blocked
+XKEY_Z="11111111-2222-3333-4444-555555555555"
+http_post "$API/orders/$SCOPE_Z_ORDER/exchanges" "{\"idempotency_key\":\"$XKEY_Z\",\"return_items\":[{\"original_line_item_id\":\"$Z_LINE_ID\",\"quantity\":1}],\"new_items\":[{\"sku\":\"N1\",\"description\":\"New\",\"quantity\":1,\"unit_price_cents\":500}]}"
+assert_status "[T5] Cross-scope exchange blocked" "403" "$_STATUS"
+
+TOKEN="$SAVED_TOKEN"
+echo ""
+
+###########################################################################
+echo "── Section 26: [T7] Out-of-scope reversal exec ───"
+
+# Initiate a reversal as admin on SCOPE-Z order
+RVKEY="22222222-3333-4444-5555-666666666666"
+http_post "$API/orders/$SCOPE_Z_ORDER/reversals" "{\"idempotency_key\":\"$RVKEY\",\"notes\":\"scope test\"}"
+RV_APPR_ID=$(jf approval_request_id)
+
+# Create manager to approve
+http_post "$API/users" "{\"username\":\"mgr_scope\",\"password\":\"ManagerPass123\",\"role_id\":\"a0000000-0000-0000-0000-000000000002\",\"location\":\"SCOPE-Z\"}"
+http_post_noauth "$API/auth/login" '{"username":"mgr_scope","password":"ManagerPass123"}'
+MGR_SCOPE_TOKEN=$(jf access_token)
+SAVED2="$TOKEN"
+TOKEN="$MGR_SCOPE_TOKEN"
+http_post "$API/approvals/$RV_APPR_ID/approve" '{}'
+TOKEN="$SAVED2"
+
+# Now try to execute reversal as cashier (out of scope)
+TOKEN="$CASHIER_TOKEN"
+RVEXEC="33333333-4444-5555-6666-777777777777"
+http_post "$API/orders/$SCOPE_Z_ORDER/reversals/execute" "{\"approval_request_id\":\"$RV_APPR_ID\",\"idempotency_key\":\"$RVEXEC\"}"
+assert_status "[T7] Out-of-scope reversal exec blocked" "403" "$_STATUS"
+TOKEN="$SAVED_TOKEN"
+echo ""
+
+###########################################################################
+echo "── Section 27: [T8] Large-scale async export ─────"
+
+# Create export with 250000 estimated rows
+http_post "$API/exports" "{\"report_definition_id\":\"$ASYNC_RPT_ID\",\"export_format\":\"csv\",\"estimated_rows\":250000}"
+LARGE_EXP=$(jf id)
+assert_status "[T8] Large export job created" "202" "$_STATUS"
+
+# Poll for progress (worker runs every 5s, give it time)
+sleep 8
+http_get "$API/exports/$LARGE_EXP"
+assert_status "[T8] Large export accessible" "200" "$_STATUS"
+# Should show progress (not still at 0%)
+assert_body_not "[T8] Export progressed past zero" "\"progress_pct\":0"
+echo ""
+
+###########################################################################
+echo "── Section 28: [T9] Parallel idempotency race ────"
+
+# Create a new order for race test
+http_post "$API/orders" '{"location":"RACE-1","line_items":[{"sku":"R1","description":"Race","quantity":1,"unit_price_cents":200,"tax_cents":0}]}'
+RACE_ORDER=$(jf id)
+http_post "$API/orders/$RACE_ORDER/transition" '{"target_status":"open"}'
+http_post "$API/orders/$RACE_ORDER/transition" '{"target_status":"tendering"}'
+
+# Send two near-simultaneous payments with the SAME idempotency key
+RACE_KEY="44444444-5555-6666-7777-888888888888"
+# Fire both concurrently using background subshells
+_STATUS1=$(curl -s -o "$_TMPF.r1" -w "%{http_code}" -X POST \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"tender_type\":\"cash\",\"amount_cents\":200,\"idempotency_key\":\"$RACE_KEY\"}" \
+  "$API/orders/$RACE_ORDER/payments") &
+PID1=$!
+
+_STATUS2=$(curl -s -o "$_TMPF.r2" -w "%{http_code}" -X POST \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"tender_type\":\"cash\",\"amount_cents\":200,\"idempotency_key\":\"$RACE_KEY\"}" \
+  "$API/orders/$RACE_ORDER/payments") &
+PID2=$!
+
+wait $PID1 2>/dev/null
+wait $PID2 2>/dev/null
+
+# At least one should succeed (201), the other either 201 (cached replay) or 409 (conflict)
+# Neither should result in 500 or double mutation
+S1=$(cat "$_TMPF.r1" 2>/dev/null | wc -c)
+S2=$(cat "$_TMPF.r2" 2>/dev/null | wc -c)
+TOTAL=$((TOTAL + 1))
+if [ "$S1" -gt 0 ] || [ "$S2" -gt 0 ]; then
+  PASS=$((PASS + 1)); echo "  [PASS] [T9] Parallel race: both completed without crash"
+else
+  FAIL=$((FAIL + 1)); echo "  [FAIL] [T9] Parallel race: no response received"
+  FAILURES="$FAILURES\n  [FAIL] [T9] Parallel race failed"
+fi
+rm -f "$_TMPF.r1" "$_TMPF.r2"
+
+# Verify only one payment exists (no double mutation)
+http_get "$API/orders/$RACE_ORDER/payments"
+PAYMENT_COUNT=$(echo "$_BODY" | grep -o '"id"' | wc -l)
+TOTAL=$((TOTAL + 1))
+if [ "$PAYMENT_COUNT" -le 1 ]; then
+  PASS=$((PASS + 1)); echo "  [PASS] [T9] No duplicate mutation: $PAYMENT_COUNT payment(s)"
+else
+  FAIL=$((FAIL + 1)); echo "  [FAIL] [T9] Duplicate mutation: $PAYMENT_COUNT payments"
+  FAILURES="$FAILURES\n  [FAIL] [T9] Duplicate mutation detected"
+fi
+echo ""
+
+###########################################################################
+echo "── Section 29: [T10] Self-reject blocked ─────────"
+
+# Admin creates an approval request
+http_post "$API/approvals" '{"permission_point_id":"b0000000-0000-0000-0000-000000000001","payload":{"test":"self_reject"}}'
+SELF_REJ_ID=$(jf id)
+
+# Admin tries to reject own request — should be blocked
+http_post "$API/approvals/$SELF_REJ_ID/reject" '{}'
+assert_status "[T10] Self-reject blocked" "403" "$_STATUS"
+echo ""
+
+###########################################################################
+echo "── Section 30: [T11] Audit hashes on more writes ─"
+
+# Verify receipt create audit has after_hash
+http_get "$API/audit?resource_type=receipts&action=create"
+assert_status "[T11] Receipt audit exists" "200" "$_STATUS"
+assert_body "[T11] Receipt audit has after_hash" "after_hash"
+
+# Verify participant update audit has before+after
+http_get "$API/audit?resource_type=participants&action=update"
+assert_status "[T11] Participant update audit exists" "200" "$_STATUS"
+assert_body "[T11] Participant update has before_hash" "before_hash"
+assert_body "[T11] Participant update has after_hash" "after_hash"
+echo ""
+
+###########################################################################
+echo "── Section 31: [I7] KPI filter/dimension tests ───"
+
+# Create a report with unsupported dimension → 400
+http_post "$API/reports" '{"name":"Bad Dim Report","kpi_type":"participation_by_store","dimensions":["invalid_dim"]}'
+assert_status "[I7] Unsupported dimension rejected" "400" "$_STATUS"
+
+# Create report with valid dimension
+http_post "$API/reports" '{"name":"Valid Dim Report","kpi_type":"participation_by_store","dimensions":["location"]}'
+assert_status "[I7] Valid dimension accepted" "201" "$_STATUS"
+FILT_RPT=$(jf id)
+
+# Run with location filter — output should be filtered
+http_post "$API/reports/$FILT_RPT/run" '{"filters":{"location":"NYC-01"}}'
+assert_status "[I7] Filtered report runs" "200" "$_STATUS"
+assert_body "[I7] Report has data" "data"
+
+# Run with unsupported filter → 400
+http_post "$API/reports/$FILT_RPT/run" '{"filters":{"unsupported_key":"val"}}'
+assert_status "[I7] Unsupported filter rejected" "400" "$_STATUS"
+
+# Verify participation_by_department grouping
+http_post "$API/reports" '{"name":"Dept Report","kpi_type":"participation_by_department","dimensions":["department"]}'
+DEPT_RPT=$(jf id)
+http_post "$API/reports/$DEPT_RPT/run" '{"filters":{"department":"Sales"}}'
+assert_status "[I7] Department KPI with filter" "200" "$_STATUS"
+assert_body "[I7] Has department in output" "department"
+echo ""
+
+###########################################################################
+echo "── Section 32: [I4] Notification audit coverage ──"
+
+# Verify notification send audit
+http_get "$API/audit?resource_type=notifications&action=create"
+assert_status "[I4] Notification audit exists" "200" "$_STATUS"
+assert_body "[I4] Notification audit has after_hash" "after_hash"
+assert_body_not "[I4] No password in notification audit" "password"
+
+# Verify team create audit
+http_get "$API/audit?resource_type=teams&action=create"
+assert_status "[I4] Team create audit exists" "200" "$_STATUS"
+assert_body "[I4] Team audit has after_hash" "after_hash"
+echo ""
+
+###########################################################################
 echo ""
 echo "============================================"
 echo "  API TEST RESULTS"

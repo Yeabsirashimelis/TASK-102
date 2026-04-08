@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use diesel::prelude::*;
 use uuid::Uuid;
@@ -7,15 +7,16 @@ use crate::auth::middleware::AuthenticatedUser;
 use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::models::approval::*;
-use crate::rbac::guard::{check_permission, check_permission_no_approval};
+use crate::rbac::guard::{check_permission, check_permission_for_request, check_permission_no_approval};
 use crate::schema::{approval_policies, approval_requests};
 
 pub async fn list(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission_no_approval(&auth.0, "approval.list", &mut conn)?;
+    let _ctx = check_permission_for_request(&auth.0, "approval.list", req.method().as_str(), req.path(), &mut conn)?;
 
     let results: Vec<ApprovalRequest> = approval_requests::table
         .select(ApprovalRequest::as_select())
@@ -30,11 +31,12 @@ pub async fn list(
 pub async fn get(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let req_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission_no_approval(&auth.0, "approval.read", &mut conn)?;
+    let _ctx = check_permission_for_request(&auth.0, "approval.read", req.method().as_str(), req.path(), &mut conn)?;
 
     let approval: ApprovalRequest = approval_requests::table
         .find(req_id)
@@ -46,11 +48,12 @@ pub async fn get(
 pub async fn approve(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let req_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission_no_approval(&auth.0, "approval.decide", &mut conn)?;
+    let _ctx = check_permission_for_request(&auth.0, "approval.decide", req.method().as_str(), req.path(), &mut conn)?;
 
     let approval: ApprovalRequest = approval_requests::table
         .find(req_id)
@@ -110,11 +113,12 @@ pub async fn approve(
 pub async fn reject(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let req_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission_no_approval(&auth.0, "approval.decide", &mut conn)?;
+    let _ctx = check_permission_for_request(&auth.0, "approval.decide", req.method().as_str(), req.path(), &mut conn)?;
 
     let approval: ApprovalRequest = approval_requests::table
         .find(req_id)

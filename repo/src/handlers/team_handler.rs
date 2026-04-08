@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use diesel::prelude::*;
 use uuid::Uuid;
@@ -9,19 +9,25 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::models::team::*;
 use crate::models::team_member::*;
-use crate::rbac::guard::check_permission;
+use crate::rbac::guard::check_permission_for_request;
 use crate::schema::{team_members, teams};
+
+fn check_perm(auth: &crate::auth::jwt::Claims, code: &str, req: &HttpRequest, conn: &mut diesel::PgConnection)
+    -> Result<crate::rbac::data_scope::PermissionContext, AppError> {
+    check_permission_for_request(auth, code, req.method().as_str(), req.path(), conn)
+}
 
 pub async fn create(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<CreateTeamRequest>,
 ) -> Result<HttpResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::Validation(e.to_string()))?;
 
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "team.create", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "team.create", &req, &mut conn)?;
 
     let new = NewTeam {
         name: body.name.clone(),
@@ -35,15 +41,19 @@ pub async fn create(
         .values(&new)
         .get_result(&mut conn)?;
 
+    let after = serde_json::json!({"id": team.id, "name": &team.name});
+    let _ = crate::audit::service::audit_write(&mut conn, auth.0.sub, "create", "teams", Some(team.id), None, Some(&after));
+
     Ok(HttpResponse::Created().json(TeamResponse::from(team)))
 }
 
 pub async fn list(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.read", &req, &mut conn)?;
 
     let mut q = teams::table
         .filter(teams::is_active.eq(true))
@@ -78,11 +88,12 @@ pub async fn list(
 pub async fn get(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let team_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.read", &req, &mut conn)?;
 
     let team: Team = teams::table
         .find(team_id)
@@ -108,6 +119,7 @@ pub async fn get(
 pub async fn update(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<UpdateTeamRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -116,7 +128,7 @@ pub async fn update(
 
     let team_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.update", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.update", &req, &mut conn)?;
 
     let existing: Team = teams::table.find(team_id).select(Team::as_select()).first(&mut conn)?;
     ctx.enforce_scope(existing.created_by, existing.department.as_deref(), existing.location.as_deref())?;
@@ -140,11 +152,12 @@ pub async fn update(
 pub async fn deactivate(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let team_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.delete", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.delete", &req, &mut conn)?;
     let t: Team = teams::table.find(team_id).select(Team::as_select()).first(&mut conn)?;
     ctx.enforce_scope(t.created_by, t.department.as_deref(), t.location.as_deref())?;
 
@@ -163,12 +176,13 @@ pub async fn deactivate(
 pub async fn add_member(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<AddMemberRequest>,
 ) -> Result<HttpResponse, AppError> {
     let team_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.manage_members", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.manage_members", &req, &mut conn)?;
     let t: Team = teams::table.find(team_id).select(Team::as_select()).first(&mut conn)?;
     ctx.enforce_scope(t.created_by, t.department.as_deref(), t.location.as_deref())?;
 
@@ -188,11 +202,12 @@ pub async fn add_member(
 pub async fn remove_member(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let (team_id, participant_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.manage_members", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.manage_members", &req, &mut conn)?;
     let t: Team = teams::table.find(team_id).select(Team::as_select()).first(&mut conn)?;
     ctx.enforce_scope(t.created_by, t.department.as_deref(), t.location.as_deref())?;
 
@@ -213,11 +228,12 @@ pub async fn remove_member(
 pub async fn list_members(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let team_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "team.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "team.read", &req, &mut conn)?;
     let t: Team = teams::table.find(team_id).select(Team::as_select()).first(&mut conn)?;
     ctx.enforce_scope(t.created_by, t.department.as_deref(), t.location.as_deref())?;
 

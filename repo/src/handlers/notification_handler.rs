@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use diesel::prelude::*;
 use uuid::Uuid;
@@ -10,7 +10,12 @@ use crate::errors::AppError;
 use crate::models::delivery_log::*;
 use crate::models::notification::*;
 use crate::models::notification_template::*;
-use crate::rbac::guard::check_permission;
+use crate::rbac::guard::check_permission_for_request;
+
+fn check_perm(auth: &crate::auth::jwt::Claims, code: &str, req: &HttpRequest, conn: &mut diesel::PgConnection)
+    -> Result<crate::rbac::data_scope::PermissionContext, AppError> {
+    check_permission_for_request(auth, code, req.method().as_str(), req.path(), conn)
+}
 use crate::schema::{delivery_logs, notification_templates, notifications, users};
 
 // ===================== Template CRUD =====================
@@ -18,13 +23,14 @@ use crate::schema::{delivery_logs, notification_templates, notifications, users}
 pub async fn create_template(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<CreateTemplateRequest>,
 ) -> Result<HttpResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::Validation(e.to_string()))?;
 
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.template.create", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.template.create", &req, &mut conn)?;
 
     let new = NewNotificationTemplate {
         code: body.code.clone(),
@@ -45,9 +51,10 @@ pub async fn create_template(
 pub async fn list_templates(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.template.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.template.read", &req, &mut conn)?;
 
     let results: Vec<NotificationTemplate> = notification_templates::table
         .filter(notification_templates::is_active.eq(true))
@@ -63,11 +70,12 @@ pub async fn list_templates(
 pub async fn get_template(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let template_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.template.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.template.read", &req, &mut conn)?;
 
     let template: NotificationTemplate = notification_templates::table
         .find(template_id)
@@ -80,6 +88,7 @@ pub async fn get_template(
 pub async fn update_template(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<UpdateTemplateRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -88,7 +97,7 @@ pub async fn update_template(
 
     let template_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.template.update", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.template.update", &req, &mut conn)?;
 
     let changeset = UpdateNotificationTemplate {
         name: body.name.clone(),
@@ -110,11 +119,12 @@ pub async fn update_template(
 pub async fn delete_template(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let template_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.template.delete", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.template.delete", &req, &mut conn)?;
 
     diesel::update(notification_templates::table.find(template_id))
         .set((
@@ -131,10 +141,11 @@ pub async fn delete_template(
 pub async fn send_templated(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<SendNotificationRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.send", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.send", &req, &mut conn)?;
 
     // Look up template
     let template: NotificationTemplate = notification_templates::table
@@ -164,16 +175,19 @@ pub async fn send_templated(
     };
 
     let notification = create_and_deliver(&mut conn, new)?;
+    let after = serde_json::json!({"id": notification.id, "recipient": notification.recipient_user_id, "category": format!("{:?}", notification.category)});
+    let _ = crate::audit::service::audit_write(&mut conn, auth.0.sub, "create", "notifications", Some(notification.id), None, Some(&after));
     Ok(HttpResponse::Created().json(NotificationResponse::from(notification)))
 }
 
 pub async fn send_direct(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<SendDirectNotificationRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.send", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.send", &req, &mut conn)?;
 
     let new = NewNotification {
         recipient_user_id: body.recipient_user_id,
@@ -187,16 +201,19 @@ pub async fn send_direct(
     };
 
     let notification = create_and_deliver(&mut conn, new)?;
+    let after = serde_json::json!({"id": notification.id, "recipient": notification.recipient_user_id});
+    let _ = crate::audit::service::audit_write(&mut conn, auth.0.sub, "create", "notifications", Some(notification.id), None, Some(&after));
     Ok(HttpResponse::Created().json(NotificationResponse::from(notification)))
 }
 
 pub async fn broadcast(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<BroadcastRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.broadcast", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.broadcast", &req, &mut conn)?;
 
     // Get all active user IDs
     let user_ids: Vec<Uuid> = users::table
@@ -231,10 +248,11 @@ pub async fn broadcast(
 pub async fn inbox(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     query: web::Query<NotificationQueryParams>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.read", &req, &mut conn)?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(200);
@@ -266,11 +284,12 @@ pub async fn inbox(
 pub async fn get_notification(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let notif_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.read", &req, &mut conn)?;
 
     let notif: Notification = notifications::table
         .find(notif_id)
@@ -284,11 +303,12 @@ pub async fn get_notification(
 pub async fn mark_read(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let notif_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.read", &req, &mut conn)?;
 
     let updated = diesel::update(
         notifications::table
@@ -311,9 +331,10 @@ pub async fn mark_read(
 pub async fn mark_all_read(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.read", &req, &mut conn)?;
 
     let updated = diesel::update(
         notifications::table
@@ -332,9 +353,10 @@ pub async fn mark_all_read(
 pub async fn unread_count(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.read", &req, &mut conn)?;
 
     let count: i64 = notifications::table
         .filter(notifications::recipient_user_id.eq(auth.0.sub))
@@ -350,10 +372,11 @@ pub async fn unread_count(
 pub async fn admin_list(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     query: web::Query<NotificationQueryParams>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.admin", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.admin", &req, &mut conn)?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(200);
@@ -385,11 +408,12 @@ pub async fn admin_list(
 pub async fn delivery_logs(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let notif_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.admin", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.admin", &req, &mut conn)?;
 
     let logs: Vec<DeliveryLog> = delivery_logs::table
         .filter(delivery_logs::notification_id.eq(notif_id))
@@ -405,11 +429,12 @@ pub async fn delivery_logs(
 pub async fn retry(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let notif_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "notification.retry", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "notification.retry", &req, &mut conn)?;
 
     let notif: Notification = notifications::table
         .find(notif_id)

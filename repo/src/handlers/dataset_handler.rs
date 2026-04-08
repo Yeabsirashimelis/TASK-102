@@ -12,23 +12,29 @@ use crate::models::dataset::*;
 use crate::models::dataset_version::*;
 use crate::models::field_dictionary::*;
 use crate::models::version_lineage::*;
-use crate::rbac::guard::{check_permission, check_permission_for_request, check_permission_no_approval, resolve_permission_id};
+use crate::rbac::guard::{check_permission_for_request, check_permission_no_approval, resolve_permission_id};
 use crate::schema::{
     approval_requests, dataset_versions, datasets, field_dictionaries, version_lineage,
 };
+
+fn check_perm(auth: &crate::auth::jwt::Claims, code: &str, req: &HttpRequest, conn: &mut diesel::PgConnection)
+    -> Result<crate::rbac::data_scope::PermissionContext, AppError> {
+    check_permission_for_request(auth, code, req.method().as_str(), req.path(), conn)
+}
 
 // ===================== Dataset CRUD =====================
 
 pub async fn create_dataset(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<CreateDatasetRequest>,
 ) -> Result<HttpResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::Validation(e.to_string()))?;
 
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.create", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.create", &req, &mut conn)?;
 
     let new = NewDataset {
         name: body.name.clone(),
@@ -47,10 +53,11 @@ pub async fn create_dataset(
 pub async fn list_datasets(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     query: web::Query<DatasetQueryParams>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.read", &req, &mut conn)?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(200);
@@ -98,11 +105,12 @@ pub async fn list_datasets(
 pub async fn get_dataset(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let dataset_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.read", &req, &mut conn)?;
 
     let dataset: Dataset = datasets::table
         .find(dataset_id)
@@ -124,6 +132,7 @@ pub async fn get_dataset(
 pub async fn update_dataset(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<UpdateDatasetRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -132,7 +141,7 @@ pub async fn update_dataset(
 
     let dataset_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.update", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.update", &req, &mut conn)?;
 
     let changeset = UpdateDataset {
         name: body.name.clone(),
@@ -152,11 +161,12 @@ pub async fn update_dataset(
 pub async fn deactivate_dataset(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let dataset_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.delete", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.delete", &req, &mut conn)?;
 
     diesel::update(datasets::table.find(dataset_id))
         .set((
@@ -173,12 +183,13 @@ pub async fn deactivate_dataset(
 pub async fn create_version(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<CreateVersionRequest>,
 ) -> Result<HttpResponse, AppError> {
     let dataset_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.version.create", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.version.create", &req, &mut conn)?;
 
     // Verify dataset exists and is active
     let _dataset: Dataset = datasets::table
@@ -271,12 +282,13 @@ pub async fn create_version(
 pub async fn list_versions(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     query: web::Query<VersionQueryParams>,
 ) -> Result<HttpResponse, AppError> {
     let dataset_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.version.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.version.read", &req, &mut conn)?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(200);
@@ -298,11 +310,12 @@ pub async fn list_versions(
 pub async fn get_version(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let (_dataset_id, version_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.version.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.version.read", &req, &mut conn)?;
 
     let version: DatasetVersion = dataset_versions::table
         .find(version_id)
@@ -332,11 +345,12 @@ pub async fn get_version(
 pub async fn get_lineage(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let (_dataset_id, version_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.version.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.version.read", &req, &mut conn)?;
 
     // Parents (what this version was derived from)
     let parents: Vec<VersionLineage> = version_lineage::table
@@ -362,6 +376,7 @@ pub async fn get_lineage(
 pub async fn rollback(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<RollbackRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -522,11 +537,12 @@ pub struct ExecuteRollbackRequest {
 pub async fn list_field_dictionary(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let (_dataset_id, version_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.version.read", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.version.read", &req, &mut conn)?;
 
     let fields: Vec<FieldDictionary> = field_dictionaries::table
         .filter(field_dictionaries::version_id.eq(version_id))
@@ -542,12 +558,13 @@ pub async fn list_field_dictionary(
 pub async fn add_field_entry(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<FieldDictionaryInput>,
 ) -> Result<HttpResponse, AppError> {
     let (_dataset_id, version_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.field_dict.manage", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.field_dict.manage", &req, &mut conn)?;
 
     let new = NewFieldDictionary {
         version_id,
@@ -567,6 +584,7 @@ pub async fn add_field_entry(
 pub async fn update_field_entry(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid, Uuid)>,
     body: web::Json<UpdateFieldDictionaryRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -575,7 +593,7 @@ pub async fn update_field_entry(
 
     let (_dataset_id, _version_id, field_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.field_dict.manage", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.field_dict.manage", &req, &mut conn)?;
 
     let changeset = UpdateFieldDictionary {
         field_type: body.field_type.clone(),
@@ -594,11 +612,12 @@ pub async fn update_field_entry(
 pub async fn delete_field_entry(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
     let (_dataset_id, _version_id, field_id) = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "dataset.field_dict.manage", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "dataset.field_dict.manage", &req, &mut conn)?;
 
     diesel::delete(field_dictionaries::table.find(field_id)).execute(&mut conn)?;
     Ok(HttpResponse::NoContent().finish())

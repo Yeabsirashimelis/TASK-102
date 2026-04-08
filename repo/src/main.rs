@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpServer, middleware::Logger};
+use actix_web::{web, App, HttpServer};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 mod audit;
@@ -50,10 +50,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             // Middleware layers (outermost first):
-            // 1. Structured request logging
-            .wrap(Logger::new(
-                "%a \"%r\" %s %b \"%{Referer}i\" \"%{User-Agent}i\" %T"
-            ))
+            // 1. Structured JSON request logging
+            .wrap(observability::json_logger::JsonLogger)
             // 2. Request metrics (counts, active connections)
             .wrap(observability::request_metrics::RequestMetrics)
             // 3. Audit trail for write operations

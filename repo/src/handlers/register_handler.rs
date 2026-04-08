@@ -9,7 +9,7 @@ use crate::errors::AppError;
 use crate::models::approval::{ApprovalRequest, ApprovalStatus, NewApprovalRequest};
 use crate::models::ledger_entry::{LedgerEntry, LedgerEntryKind, TenderType};
 use crate::models::register_closing::*;
-use crate::rbac::guard::{check_permission, check_permission_for_request, check_permission_no_approval};
+use crate::rbac::guard::{check_permission_for_request, check_permission_no_approval};
 use crate::schema::{approval_requests, ledger_entries, orders, register_closings};
 
 /// $20.00 variance threshold in cents
@@ -18,10 +18,11 @@ const VARIANCE_THRESHOLD_CENTS: i64 = 2000;
 pub async fn close_register(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<CloseRegisterRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "register.close", &mut conn)?;
+    let _ctx = check_permission_for_request(&auth.0, "register.close", req.method().as_str(), req.path(), &mut conn)?;
 
     let today = Utc::now().date_naive();
 
@@ -129,10 +130,11 @@ pub async fn close_register(
 pub async fn list_closings(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     query: web::Query<ClosingQueryParams>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "register.read", &mut conn)?;
+    let ctx = check_permission_for_request(&auth.0, "register.read", req.method().as_str(), req.path(), &mut conn)?;
 
     let mut q = register_closings::table.into_boxed();
 
@@ -172,11 +174,12 @@ pub async fn list_closings(
 pub async fn get_closing(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let closing_id = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "register.read", &mut conn)?;
+    let ctx = check_permission_for_request(&auth.0, "register.read", req.method().as_str(), req.path(), &mut conn)?;
 
     let closing: RegisterClosing = register_closings::table
         .find(closing_id)

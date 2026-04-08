@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use diesel::prelude::*;
 use uuid::Uuid;
@@ -9,19 +9,25 @@ use crate::db::DbPool;
 use crate::errors::AppError;
 use crate::models::participant::*;
 use crate::models::tag::*;
-use crate::rbac::guard::check_permission;
+use crate::rbac::guard::check_permission_for_request;
 use crate::schema::{participant_tags, participants, tags};
+
+fn check_perm(auth: &crate::auth::jwt::Claims, code: &str, req: &HttpRequest, conn: &mut diesel::PgConnection)
+    -> Result<crate::rbac::data_scope::PermissionContext, AppError> {
+    check_permission_for_request(auth, code, req.method().as_str(), req.path(), conn)
+}
 
 pub async fn create(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<CreateParticipantRequest>,
 ) -> Result<HttpResponse, AppError> {
     body.validate()
         .map_err(|e| AppError::Validation(e.to_string()))?;
 
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let _ctx = check_permission(&auth.0, "participant.create", &mut conn)?;
+    let _ctx = check_perm(&auth.0, "participant.create", &req, &mut conn)?;
 
     let (participant, tag_names) = conn.transaction::<_, AppError, _>(|conn| {
         let new = NewParticipant {
@@ -55,10 +61,11 @@ pub async fn create(
 pub async fn list(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     query: web::Query<ParticipantSearchParams>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.read", &req, &mut conn)?;
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(200);
@@ -134,11 +141,12 @@ pub async fn list(
 pub async fn get(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let pid = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.read", &req, &mut conn)?;
 
     let participant: Participant = participants::table
         .find(pid)
@@ -161,6 +169,7 @@ pub async fn get(
 pub async fn update(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<UpdateParticipantRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -169,7 +178,7 @@ pub async fn update(
 
     let pid = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.update", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.update", &req, &mut conn)?;
 
     let existing: Participant = participants::table.find(pid).select(Participant::as_select()).first(&mut conn)?;
     ctx.enforce_scope(existing.created_by, existing.department.as_deref(), existing.location.as_deref())?;
@@ -202,11 +211,12 @@ pub async fn update(
 pub async fn deactivate(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let pid = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.delete", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.delete", &req, &mut conn)?;
     let p: Participant = participants::table.find(pid).select(Participant::as_select()).first(&mut conn)?;
     ctx.enforce_scope(p.created_by, p.department.as_deref(), p.location.as_deref())?;
 
@@ -225,12 +235,13 @@ pub async fn deactivate(
 pub async fn set_tags(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
     body: web::Json<SetTagsRequest>,
 ) -> Result<HttpResponse, AppError> {
     let pid = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.tag", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.tag", &req, &mut conn)?;
     let p: Participant = participants::table.find(pid).select(Participant::as_select()).first(&mut conn)?;
     ctx.enforce_scope(p.created_by, p.department.as_deref(), p.location.as_deref())?;
 
@@ -250,11 +261,12 @@ pub async fn set_tags(
 pub async fn get_tags(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let pid = path.into_inner();
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.read", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.read", &req, &mut conn)?;
     let p: Participant = participants::table.find(pid).select(Participant::as_select()).first(&mut conn)?;
     ctx.enforce_scope(p.created_by, p.department.as_deref(), p.location.as_deref())?;
 
@@ -267,10 +279,11 @@ pub async fn get_tags(
 pub async fn bulk_tag(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<BulkTagRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.bulk", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.bulk", &req, &mut conn)?;
 
     // Validate each target is in caller scope — fail fast on first violation
     for pid in &body.participant_ids {
@@ -298,10 +311,11 @@ pub async fn bulk_tag(
 pub async fn bulk_deactivate(
     pool: web::Data<DbPool>,
     auth: AuthenticatedUser,
+    req: HttpRequest,
     body: web::Json<BulkDeactivateRequest>,
 ) -> Result<HttpResponse, AppError> {
     let mut conn = pool.get().map_err(crate::errors::pool_err)?;
-    let ctx = check_permission(&auth.0, "participant.bulk", &mut conn)?;
+    let ctx = check_perm(&auth.0, "participant.bulk", &req, &mut conn)?;
 
     // Validate each target is in caller scope — fail fast
     for pid in &body.participant_ids {

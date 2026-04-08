@@ -127,7 +127,8 @@ Reversal flow: `POST /orders/{id}/reversals` creates approval request → manage
 - **Receipt attach** (`POST /orders/{id}/receipts`): Changed from JSON body to `multipart/form-data`. Fields: `file` (binary), optional `receipt_data` (JSON metadata).
 - **Export complete** (`POST /exports/{id}/complete`): Changed from `file_path` to `file_content_base64`. Server manages all storage paths.
 - **Export/job access**: `GET /exports/{id}` and `GET /exports/{id}/download` enforce owner-or-admin access. Non-owners need `report.export.admin` permission.
-- **RBAC layer 3**: Request-aware capability enforcement is active on order, export, and approval routes. `check_permission_for_request(method, path)` enforces method+path matching against `api_capabilities`. Migration 41 seeds baseline capabilities for these routes.
+- **RBAC layer 3**: Request-aware capability enforcement is active on ALL protected handler domains: orders, exports, approvals, participants, teams, datasets, notifications, reports, and register endpoints. `check_permission_for_request(method, path)` enforces method+path matching. Migrations 41, 44, and 45 seed comprehensive capabilities.
+- **Report filters/dimensions**: `POST /reports/{id}/run` merges definition filters with runtime request filters. Unsupported dimensions or filter keys for a given KPI type return 400. Supported filter keys per KPI: `location`, `department` (where applicable).
 - **Approval request creation** (`POST /approvals`): Now requires `approval.request.create` permission (System Administrator or Store Manager only).
 - **Export checksum**: Export jobs now include `sha256_hash` field computed from the actual artifact content on completion.
 
