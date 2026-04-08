@@ -255,9 +255,12 @@ pub async fn complete_job(
         .select(ExportJob::as_select())
         .first(&mut conn)?;
 
-    if job.status != ExportStatus::Running {
+    if job.status == ExportStatus::Completed {
+        return Ok(HttpResponse::Ok().json(ExportJobResponse::from(job)));
+    }
+    if job.status != ExportStatus::Queued && job.status != ExportStatus::Running {
         return Err(AppError::Validation(
-            "Can only complete running jobs".into(),
+            "Can only complete queued or running jobs".into(),
         ));
     }
 
@@ -279,6 +282,7 @@ pub async fn complete_job(
 
     let actual_size = file_bytes.len() as i64;
 
+    let now = Utc::now();
     diesel::update(export_jobs::table.find(job_id))
         .set((
             export_jobs::status.eq(ExportStatus::Completed),
@@ -288,7 +292,8 @@ pub async fn complete_job(
             export_jobs::file_path.eq(&managed_path),
             export_jobs::file_size_bytes.eq(Some(actual_size)),
             export_jobs::sha256_hash.eq(Some(&sha256)),
-            export_jobs::completed_at.eq(Some(Utc::now())),
+            export_jobs::started_at.eq(job.started_at.or(Some(now))),
+            export_jobs::completed_at.eq(Some(now)),
         ))
         .execute(&mut conn)?;
 

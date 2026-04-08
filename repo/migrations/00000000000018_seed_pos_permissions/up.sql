@@ -36,6 +36,12 @@ SELECT 'a0000000-0000-0000-0000-000000000002', id
 FROM permission_points WHERE code LIKE 'order.%' OR code LIKE 'register.%'
 ON CONFLICT DO NOTHING;
 
+-- Store Manager must be able to approve/reject critical requests
+INSERT INTO role_permissions (role_id, permission_point_id)
+SELECT 'a0000000-0000-0000-0000-000000000002', id
+FROM permission_points WHERE code = 'approval.decide'
+ON CONFLICT DO NOTHING;
+
 -- Approval policies: Store Manager and System Administrator can approve
 INSERT INTO approval_policies (permission_point_id, min_approvers, approver_role_id) VALUES
     ('b0000000-0000-0000-0000-000000000048', 1, 'a0000000-0000-0000-0000-000000000002'),
